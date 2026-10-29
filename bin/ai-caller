@@ -1,0 +1,201 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+/**
+ * AI-Function-Caller-PHP CLI Tool
+ *
+ * Generate JSON Schema, validate LLM outputs, and test tool calls from terminal.
+ *
+ * @author Anton Barinov <https://github.com/Anton-Barinov>
+ * @license MIT
+ */
+
+// Autoload
+$autoloadPaths = [
+    __DIR__ . '/../vendor/autoload.php',
+    __DIR__ . '/../src/autoload.php',
+];
+
+$loaded = false;
+foreach ($autoloadPaths as $path) {
+    if (file_exists($path)) {
+        require_once $path;
+        $loaded = true;
+        break;
+    }
+}
+
+// Check for --bootstrap or --require options in args
+foreach ($argv as $arg) {
+    if (str_starts_with($arg, '--bootstrap=')) {
+        $bootFile = substr($arg, 12);
+        if (file_exists($bootFile)) {
+            require_once $bootFile;
+        }
+    } elseif (str_starts_with($arg, '--require=')) {
+        $reqFile = substr($arg, 10);
+        if (file_exists($reqFile)) {
+            require_once $reqFile;
+        }
+    }
+}
+
+use AiFunctionCaller\FunctionCaller;
+use AiFunctionCaller\Exceptions\AiFunctionCallerException;
+use AiFunctionCaller\Exceptions\ValidationException;
+
+$args = array_slice($argv, 1);
+$command = $args[0] ?? 'help';
+
+function showHelp(): void
+{
+    echo <<<HELP
+\033[1;36mAI-Function-Caller-PHP CLI\033[0m
+Bridge PHP DTOs and Function Calling for OpenAI, Anthropic Claude & Google Gemini.
+
+\033[1;33mUsage:\033[0m
+  bin/ai-caller <command> [arguments] [options]
+
+\033[1;33mCommands:\033[0m
+  \033[32mschema\033[0m <Class> [--provider=openai|anthropic|gemini] [--pretty]
+      Generate JSON Schema for a given PHP class.
+
+  \033[32mvalidate\033[0m <Class> <json-file-or-string>
+      Validate and hydrate JSON data into the given PHP class.
+
+  \033[32mcall\033[0m <Class> <Method> <json-args>
+      Invoke a tool method with JSON arguments and display output.
+
+  \033[32mversion\033[0m
+      Display current version.
+
+  \033[32mhelp\033[0m
+      Show this help message.
+
+\033[1;33mExamples:\033[0m
+  bin/ai-caller schema "App\\DTO\\Order" --provider=openai
+  bin/ai-caller validate "App\\DTO\\Order" '{"id": 101, "status": "shipped"}'
+
+HELP;
+}
+
+try {
+    switch ($command) {
+        case 'version':
+        case '-v':
+        case '--version':
+            echo "AI-Function-Caller-PHP v1.0.0 (PHP " . PHP_VERSION . ")\n";
+            exit(0);
+
+        case 'help':
+        case '-h':
+        case '--help':
+            showHelp();
+            exit(0);
+
+        case 'schema':
+            $class = $args[1] ?? null;
+            if ($class === null) {
+                fwrite(STDERR, "\033[1;31mError: Missing class name.\033[0m\nUsage: bin/ai-caller schema <Class> [--provider=openai|anthropic|gemini]\n");
+                exit(1);
+            }
+
+            $provider = 'openai';
+            $strict = true;
+
+            foreach ($args as $arg) {
+                if (str_starts_with($arg, '--provider=')) {
+                    $provider = strtolower(substr($arg, 11));
+                }
+                if ($arg === '--loose') {
+                    $strict = false;
+                }
+            }
+
+            $caller = FunctionCaller::create();
+            $schemaGen = $caller->getSchemaGenerator();
+            $schema = $schemaGen->generate($class, strict: $strict);
+
+            $output = match ($provider) {
+                'anthropic' => [
+                    'name' => (new \ReflectionClass($class))->getShortName(),
+                    'input_schema' => $schema,
+                ],
+                'gemini' => (new \AiFunctionCaller\Providers\GeminiProvider())->formatTool(
+                    (new \ReflectionClass($class))->getShortName(),
+                    'Schema for ' . $class,
+                    $schema
+                ),
+                default => $caller->getOpenAiStructuredOutput($class),
+            };
+
+            echo json_encode($output, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n";
+            exit(0);
+
+        case 'validate':
+            $class = $args[1] ?? null;
+            $jsonInput = $args[2] ?? null;
+
+            if ($class === null || $jsonInput === null) {
+                fwrite(STDERR, "\033[1;31mError: Missing class or JSON data.\033[0m\nUsage: bin/ai-caller validate <Class> <json-file-or-string>\n");
+                exit(1);
+            }
+
+            if (file_exists($jsonInput)) {
+                $jsonInput = (string)file_get_contents($jsonInput);
+            }
+
+            $caller = FunctionCaller::create();
+            $object = $caller->parse($class, $jsonInput);
+
+            echo "\033[1;32m✓ Validation & Hydration successful!\033[0m\n";
+            echo "Instantiated: " . get_class($object) . "\n";
+            print_r($object);
+            exit(0);
+
+        case 'call':
+            $class = $args[1] ?? null;
+            $method = $args[2] ?? null;
+            $jsonArgs = $args[3] ?? '{}';
+
+            if ($class === null || $method === null) {
+                fwrite(STDERR, "\033[1;31mError: Missing class or method.\033[0m\nUsage: bin/ai-caller call <Class> <Method> <json-args>\n");
+                exit(1);
+            }
+
+            if (file_exists($jsonArgs)) {
+                $jsonArgs = (string)file_get_contents($jsonArgs);
+            }
+
+            $caller = FunctionCaller::create();
+            $refClass = new \ReflectionClass($class);
+            $refMethod = $refClass->getMethod($method);
+            $target = $refMethod->isStatic() ? $class : $refClass->newInstance();
+            $caller->registerTool($method, [$target, $method]);
+            $result = $caller->call($method, $jsonArgs);
+
+            echo "\033[1;32m✓ Tool call executed successfully!\033[0m\n";
+            echo is_string($result) ? $result : json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+            echo "\n";
+            exit(0);
+
+        default:
+            fwrite(STDERR, "\033[1;31mUnknown command: '$command'\033[0m\n\n");
+            showHelp();
+            exit(1);
+    }
+} catch (ValidationException $e) {
+    fwrite(STDERR, "\033[1;31mValidation Error:\033[0m " . $e->getMessage() . "\n");
+    foreach ($e->getErrors() as $field => $errs) {
+        fwrite(STDERR, "  • \033[1;33m$field\033[0m: " . implode(', ', $errs) . "\n");
+    }
+    exit(2);
+} catch (AiFunctionCallerException $e) {
+    fwrite(STDERR, "\033[1;31mError:\033[0m " . $e->getMessage() . "\n");
+    exit(1);
+} catch (\Throwable $e) {
+    fwrite(STDERR, "\033[1;31mFatal Exception:\033[0m " . $e->getMessage() . "\n" . $e->getTraceAsString() . "\n");
+    exit(1);
+}
