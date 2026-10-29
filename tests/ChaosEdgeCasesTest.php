@@ -52,12 +52,42 @@ class Utf8StringDto
     }
 }
 
+class EmptyTestDto
+{
+}
+
+class EdgeTypesDto
+{
+    public function __construct(
+        public readonly ?SampleStatusEnum $optionalStatus = null,
+        public readonly ?\DateTime $mutableDate = null
+    ) {
+    }
+}
+
 class ChaosEdgeCasesTest
 {
     public function run(): void
     {
         $schemaGen = new SchemaGenerator();
         $hydrator = new Hydrator();
+
+        // 0. Empty DTO schema generation
+        $emptySchema = $schemaGen->generate(EmptyTestDto::class);
+        assert($emptySchema['type'] === 'object', 'Empty DTO schema must be object');
+        assert(empty($emptySchema['properties']), 'Empty DTO has empty properties');
+
+        // 0.1 Edge types: Nullable Enum and Mutable DateTime
+        $edgeSchema = $schemaGen->generate(EdgeTypesDto::class);
+        assert(isset($edgeSchema['properties']['optionalStatus']), 'optionalStatus property in schema');
+        assert(isset($edgeSchema['properties']['mutableDate']), 'mutableDate property in schema');
+
+        $edgeObj = $hydrator->hydrate(EdgeTypesDto::class, [
+            'optionalStatus' => null,
+            'mutableDate' => '2026-10-29T10:00:00Z',
+        ]);
+        assert($edgeObj->optionalStatus === null, 'optionalStatus is null');
+        assert($edgeObj->mutableDate instanceof \DateTime, 'mutableDate is DateTime instance');
 
         // 1. Circular dependency in SchemaGenerator
         $caughtCycle = false;
