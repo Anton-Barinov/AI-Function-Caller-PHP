@@ -7,7 +7,9 @@ require_once __DIR__ . '/SchemaGeneratorTest.php';
 require_once __DIR__ . '/HydratorTest.php';
 require_once __DIR__ . '/ProviderParityTest.php';
 require_once __DIR__ . '/FunctionCallerTest.php';
+require_once __DIR__ . '/ChaosEdgeCasesTest.php';
 
+use AiFunctionCaller\Tests\ChaosEdgeCasesTest;
 use AiFunctionCaller\Tests\FunctionCallerTest;
 use AiFunctionCaller\Tests\HydratorTest;
 use AiFunctionCaller\Tests\ProviderParityTest;
@@ -22,6 +24,7 @@ $suites = [
     'HydratorTest' => new HydratorTest(),
     'ProviderParityTest' => new ProviderParityTest(),
     'FunctionCallerTest' => new FunctionCallerTest(),
+    'ChaosEdgeCasesTest' => new ChaosEdgeCasesTest(),
 ];
 
 $passed = 0;

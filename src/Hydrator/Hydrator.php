@@ -32,12 +32,17 @@ class Hydrator
      * @template T of object
      * @param class-string<T> $class
      * @param array<string, mixed>|string $data
+     * @param int $depth Recursion depth tracker
      * @return T
      * @throws ValidationException
      * @throws HydrationException
      */
-    public function hydrate(string $class, array|string $data): object
+    public function hydrate(string $class, array|string $data, int $depth = 0): object
     {
+        if ($depth >= 32) {
+            throw new HydrationException("Maximum hydration depth of 32 exceeded (possible circular data structure)", $class);
+        }
+
         if (is_string($data)) {
             try {
                 $decoded = json_decode($data, true, 512, JSON_THROW_ON_ERROR);
@@ -90,7 +95,8 @@ class Hydrator
                         $param->getType(),
                         $param->getAttributes(),
                         $class,
-                        $pName
+                        $pName,
+                        $depth
                     );
 
                     $this->validateConstraints($castedValue, $param->getAttributes(), $pName, $errors);
@@ -133,7 +139,8 @@ class Hydrator
                         $property->getType(),
                         $property->getAttributes(),
                         $class,
-                        $propName
+                        $propName,
+                        $depth
                     );
 
                     $fieldErrors = [];
@@ -195,7 +202,8 @@ class Hydrator
         ?ReflectionType $type,
         array $attributes,
         string $declaringClass,
-        string $propertyName
+        string $propertyName,
+        int $depth = 0
     ): mixed {
         if ($value === null) {
             if ($type !== null && !$type->allowsNull()) {
@@ -258,7 +266,7 @@ class Hydrator
                     if (!is_array($value)) {
                         throw new HydrationException("Expected array, got " . get_debug_type($value), $declaringClass, $propertyName);
                     }
-                    return $this->castArrayItems($value, $attributes, $declaringClass, $propertyName);
+                    return $this->castArrayItems($value, $attributes, $declaringClass, $propertyName, $depth);
 
                 case 'DateTimeImmutable':
                 case DateTimeInterface::class:
@@ -293,7 +301,7 @@ class Hydrator
                             throw new HydrationException("Expected array/object for nested class $typeName, got " . get_debug_type($value), $declaringClass, $propertyName);
                         }
                         /** @var class-string<object> $typeName */
-                        return $this->hydrate($typeName, $value);
+                        return $this->hydrate($typeName, $value, $depth + 1);
                     }
             }
         }
@@ -308,7 +316,8 @@ class Hydrator
         array $items,
         array $attributes,
         string $declaringClass,
-        string $propertyName
+        string $propertyName,
+        int $depth = 0
     ): array {
         $itemType = null;
         foreach ($attributes as $attr) {
@@ -333,7 +342,7 @@ class Hydrator
                     throw new HydrationException("Item at index $index must be an object/array", $declaringClass, $path);
                 }
                 /** @var class-string<object> $itemType */
-                $result[] = $this->hydrate($itemType, $item);
+                $result[] = $this->hydrate($itemType, $item, $depth + 1);
             } elseif (enum_exists($itemType)) {
                 $result[] = $this->castEnum($item, $itemType, $declaringClass, $path);
             } else {

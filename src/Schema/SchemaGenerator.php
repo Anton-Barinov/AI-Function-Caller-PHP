@@ -40,14 +40,26 @@ class SchemaGenerator
      *
      * @param class-string $class
      * @param bool $strict Whether to enforce OpenAI strict structured outputs (all fields required, additionalProperties: false)
+     * @param list<string> $stack Internal stack for cycle detection
      * @return array<string, mixed>
      */
-    public function generate(string $class, bool $strict = true): array
+    public function generate(string $class, bool $strict = true, array $stack = []): array
     {
         $cacheKey = $class . ':' . ($strict ? 'strict' : 'loose');
-        if (isset(self::$cache[$cacheKey])) {
+        if (empty($stack) && isset(self::$cache[$cacheKey])) {
             return self::$cache[$cacheKey];
         }
+
+        if (in_array($class, $stack, true)) {
+            $cyclePath = implode(' -> ', array_merge($stack, [$class]));
+            throw new SchemaException("Circular dependency detected in DTO hierarchy: {$cyclePath}", $class);
+        }
+
+        if (count($stack) >= 32) {
+            throw new SchemaException("Maximum DTO nesting depth of 32 exceeded", $class);
+        }
+
+        $currentStack = array_merge($stack, [$class]);
 
         if (!class_exists($class) && !enum_exists($class)) {
             throw new SchemaException("Class or enum '$class' does not exist.", $class);
@@ -63,7 +75,9 @@ class SchemaGenerator
 
         if ($refClass->isEnum()) {
             $schema = $this->generateEnumSchema($refClass);
-            self::$cache[$cacheKey] = $schema;
+            if (empty($stack)) {
+                self::$cache[$cacheKey] = $schema;
+            }
             return $schema;
         }
 
@@ -88,7 +102,7 @@ class SchemaGenerator
                 $propName = $param->getName();
                 $processedProps[$propName] = true;
 
-                $propSchema = $this->generateParameterSchema($param, $strict);
+                $propSchema = $this->generateParameterSchema($param, $strict, $currentStack);
                 $properties[$propName] = $propSchema;
 
                 if ($this->isPropertyRequired($param, $strict)) {
@@ -104,7 +118,7 @@ class SchemaGenerator
                 continue;
             }
 
-            $propSchema = $this->generatePropertySchema($property, $strict);
+            $propSchema = $this->generatePropertySchema($property, $strict, $currentStack);
             $properties[$propName] = $propSchema;
 
             if ($this->isReflectionPropertyRequired($property, $strict)) {
@@ -119,7 +133,9 @@ class SchemaGenerator
             $schema['additionalProperties'] = false;
         }
 
-        self::$cache[$cacheKey] = $schema;
+        if (empty($stack)) {
+            self::$cache[$cacheKey] = $schema;
+        }
         return $schema;
     }
 
@@ -235,10 +251,10 @@ class SchemaGenerator
         return $schema;
     }
 
-    private function generateParameterSchema(ReflectionParameter $param, bool $strict): array
+    private function generateParameterSchema(ReflectionParameter $param, bool $strict, array $stack = []): array
     {
         $type = $param->getType();
-        $schema = $this->typeToSchema($type, $strict, $param->getAttributes(Items::class));
+        $schema = $this->typeToSchema($type, $strict, $param->getAttributes(Items::class), $stack);
 
         // Apply attributes
         $this->applyAttributes($schema, $param->getAttributes());
@@ -259,10 +275,10 @@ class SchemaGenerator
         return $schema;
     }
 
-    private function generatePropertySchema(ReflectionProperty $property, bool $strict): array
+    private function generatePropertySchema(ReflectionProperty $property, bool $strict, array $stack = []): array
     {
         $type = $property->getType();
-        $schema = $this->typeToSchema($type, $strict, $property->getAttributes(Items::class));
+        $schema = $this->typeToSchema($type, $strict, $property->getAttributes(Items::class), $stack);
 
         $this->applyAttributes($schema, $property->getAttributes());
 
@@ -282,8 +298,9 @@ class SchemaGenerator
 
     /**
      * @param array<ReflectionAttribute<object>> $itemsAttrs
+     * @param list<string> $stack
      */
-    private function typeToSchema(?ReflectionType $type, bool $strict, array $itemsAttrs = []): array
+    private function typeToSchema(?ReflectionType $type, bool $strict, array $itemsAttrs = [], array $stack = []): array
     {
         if ($type === null) {
             return [];
@@ -303,14 +320,14 @@ class SchemaGenerator
             }
 
             if (count($nonNullTypes) === 1) {
-                $baseSchema = $this->typeToSchema($nonNullTypes[0], $strict, $itemsAttrs);
+                $baseSchema = $this->typeToSchema($nonNullTypes[0], $strict, $itemsAttrs, $stack);
                 if ($isNullable) {
                     return $this->makeNullable($baseSchema, $strict);
                 }
                 return $baseSchema;
             }
 
-            $schemas = array_map(fn($t) => $this->typeToSchema($t, $strict, $itemsAttrs), $nonNullTypes);
+            $schemas = array_map(fn($t) => $this->typeToSchema($t, $strict, $itemsAttrs, $stack), $nonNullTypes);
             if ($isNullable) {
                 $schemas[] = ['type' => 'null'];
             }
@@ -318,7 +335,7 @@ class SchemaGenerator
         }
 
         if ($type instanceof ReflectionIntersectionType) {
-            $schemas = array_map(fn($t) => $this->typeToSchema($t, $strict, $itemsAttrs), $type->getTypes());
+            $schemas = array_map(fn($t) => $this->typeToSchema($t, $strict, $itemsAttrs, $stack), $type->getTypes());
             return ['allOf' => $schemas];
         }
 
@@ -331,10 +348,10 @@ class SchemaGenerator
                 'float' => ['type' => 'number'],
                 'string' => ['type' => 'string'],
                 'bool' => ['type' => 'boolean'],
-                'array' => $this->resolveArraySchema($itemsAttrs, $strict),
+                'array' => $this->resolveArraySchema($itemsAttrs, $strict, $stack),
                 'object' => ['type' => 'object'],
                 'mixed' => [],
-                default => $this->resolveNamedClassSchema($typeName, $strict),
+                default => $this->resolveNamedClassSchema($typeName, $strict, $stack),
             };
 
             if ($isNullable) {
@@ -347,7 +364,7 @@ class SchemaGenerator
         return [];
     }
 
-    private function resolveNamedClassSchema(string $className, bool $strict): array
+    private function resolveNamedClassSchema(string $className, bool $strict, array $stack = []): array
     {
         if (is_subclass_of($className, DateTimeInterface::class) || $className === DateTimeInterface::class) {
             return [
@@ -363,7 +380,7 @@ class SchemaGenerator
         }
 
         if (class_exists($className)) {
-            return $this->generate($className, $strict);
+            return $this->generate($className, $strict, $stack);
         }
 
         return ['type' => 'string'];
@@ -371,8 +388,9 @@ class SchemaGenerator
 
     /**
      * @param array<ReflectionAttribute<object>> $itemsAttrs
+     * @param list<string> $stack
      */
-    private function resolveArraySchema(array $itemsAttrs, bool $strict): array
+    private function resolveArraySchema(array $itemsAttrs, bool $strict, array $stack = []): array
     {
         $schema = ['type' => 'array'];
 
@@ -382,7 +400,7 @@ class SchemaGenerator
             $itemType = $items->type;
 
             if (class_exists($itemType) || enum_exists($itemType)) {
-                $itemSchema = $this->resolveNamedClassSchema($itemType, $strict);
+                $itemSchema = $this->resolveNamedClassSchema($itemType, $strict, $stack);
             } else {
                 $itemSchema = match ($itemType) {
                     'int', 'integer' => ['type' => 'integer'],
